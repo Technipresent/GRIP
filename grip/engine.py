@@ -2,7 +2,7 @@
 import asyncio
 
 from grip.contracts import CheckerScore, Claim, ClaimResult, GroundRequest, GroundResponse, Quote
-from grip.meaning import Thresholds, check_pair
+from grip.meaning import Thresholds, check_pairs
 from grip.planner import plan
 from grip.rules import decide
 from grip.search import gather
@@ -16,8 +16,8 @@ class Engine:
 
     async def ground_claim(self, claim: Claim) -> ClaimResult:
         outcome = await gather(claim, plan(claim), self.providers, self.reader)
-        pairs = await asyncio.gather(*(check_pair(claim.text, ev.passage, self.checkers, self.thresholds)
-                                       for ev in outcome.evidence))
+        pairs = await check_pairs(claim.text, [ev.passage for ev in outcome.evidence],
+                                  self.checkers, self.thresholds)
         judged = list(zip(outcome.evidence, pairs))
         d = decide(claim, outcome, judged)
         return ClaimResult(

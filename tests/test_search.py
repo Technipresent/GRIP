@@ -74,3 +74,15 @@ async def test_sentence_sharing_only_subject_words_is_not_evidence():
     out = await gather(claim, plan(claim), {"brave": brave, "exa": FakeProvider("exa")},
                        FakeReader({"https://a.org/x": page}))
     assert out.evidence == ()
+
+
+async def test_evidence_capped_to_most_relevant():
+    from grip.search import MAX_EVIDENCE
+    urls = [f"https://site{i:02d}.org/a" for i in range(MAX_EVIDENCE + 2)]
+    pages = {u: PAGE for u in urls}
+    strong = "Aspirin reduces fever in adults; in adults aspirin reliably reduces fever."
+    pages[urls[-1]] = strong
+    out = await gather(CLAIM, plan(CLAIM), {"brave": FakeProvider("brave", {"aspirin": urls}),
+                                            "exa": FakeProvider("exa")}, FakeReader(pages))
+    assert len(out.evidence) == MAX_EVIDENCE
+    assert [e.url for e in out.evidence] == sorted(e.url for e in out.evidence)

@@ -42,3 +42,22 @@ def test_checker_service_scores_with_injected_scorer():
 def test_checker_service_refuses_unknown_model():
     with pytest.raises(ValueError):
         create_checker_app("gpt", scorer=lambda p: [])
+
+
+async def test_http_checker_score_many_single_request():
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(len(body["pairs"]))
+        return httpx.Response(200, json={"scores": [0.1 * (i + 1) for i in range(len(body["pairs"]))]})
+    chk = HttpChecker("hhem", "http://chk", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert await chk.score_many("c", ["a", "b", "c"]) == pytest.approx([0.1, 0.2, 0.3])
+    assert calls == [3]
+
+
+async def test_http_checker_score_many_rejects_wrong_count():
+    chk = HttpChecker("hhem", "http://chk", httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"scores": [0.5]}))))
+    with pytest.raises(RuntimeError):
+        await chk.score_many("c", ["a", "b"])

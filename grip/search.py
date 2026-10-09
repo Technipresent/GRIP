@@ -14,6 +14,7 @@ STOPWORDS = {"the", "and", "for", "are", "was", "were", "with", "that", "this", 
              "had", "its", "into", "than", "then", "when", "who", "what", "which", "will", "can", "not",
              "but", "all", "any", "been", "being", "their", "there", "they", "them", "his", "her", "our"}
 _WORD = re.compile(r"[a-z0-9]+")
+MAX_EVIDENCE = 8
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class Evidence:
     providers: tuple[str, ...]
     quote: str
     passage: str
+    relevance: int = 0
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,7 @@ def tokens(text: str) -> set[str]:
     return {w for w in _WORD.findall(text.lower()) if len(w) >= 3 and w not in STOPWORDS}
 
 
-def best_quote(claim: Claim, page: str) -> tuple[str, str] | None:
+def best_quote(claim: Claim, page: str) -> tuple[str, str, int] | None:
     subject = tokens(claim.subject)
     page_tokens = tokens(page)
     if not subject or not subject <= page_tokens:
@@ -65,7 +67,7 @@ def best_quote(claim: Claim, page: str) -> tuple[str, str] | None:
     if best is None:
         return None
     passage = " ".join(sentences[max(0, best - 1): best + 2])
-    return sentences[best], passage
+    return sentences[best], passage, best_score
 
 
 async def gather(claim: Claim, planned: list[PlannedQuery], providers: dict, reader) -> SearchOutcome:
@@ -92,9 +94,10 @@ async def gather(claim: Claim, planned: list[PlannedQuery], providers: dict, rea
         dom = domain_of(url)
         if found and dom not in by_domain:
             by_domain[dom] = Evidence(url=url, domain=dom, providers=tuple(sorted(url_providers[url])),
-                                      quote=found[0], passage=found[1])
+                                      quote=found[0], passage=found[1], relevance=found[2])
 
-    evidence = tuple(sorted(by_domain.values(), key=lambda e: e.url))
+    strongest = sorted(by_domain.values(), key=lambda e: (-e.relevance, e.url))[:MAX_EVIDENCE]
+    evidence = tuple(sorted(strongest, key=lambda e: e.url))
     tried = len({n for n, _ in jobs})
     return SearchOutcome(evidence=evidence, total_hits=total, failed_providers=tuple(sorted(failed)),
                          providers_tried=tried)

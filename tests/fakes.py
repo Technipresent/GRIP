@@ -46,3 +46,15 @@ class FakeChecker:
             if phrase.lower() in passage.lower():
                 return value
         return self.default
+
+
+class BatchChecker(FakeChecker):
+    """Counts batched calls; scores each passage like FakeChecker."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.batch_calls = 0
+
+    async def score_many(self, claim, passages):
+        self.batch_calls += 1
+        return [await self.score(claim, p) for p in passages]
