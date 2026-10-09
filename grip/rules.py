@@ -14,6 +14,13 @@ SCOPE_WORDS = ("first", "only", "largest", "smallest", "oldest", "newest", "bigg
 AUTHORITY = {3: ("gov", "edu", "who.int", "europa.eu", "un.org", "nih.gov", "gc.ca", "gov.uk"),
              2: ("wikipedia.org", "britannica.com", "nature.com", "science.org", "reuters.com", "apnews.com")}
 WEIGH_RATIO = 3.0
+MAGNITUDE_WINDOW = 0.10
+_QTY = re.compile(r"(?<![\d.,:])(\d[\d,]*(?:\.\d+)?)(?![\d:])\s*([a-zA-Z%]+)?")
+_UNITS = {"m": "m", "metre": "m", "metres": "m", "meter": "m", "meters": "m",
+          "km": "km", "kilometre": "km", "kilometres": "km", "kilometer": "km", "kilometers": "km",
+          "ft": "ft", "feet": "ft", "foot": "ft", "mi": "mi", "mile": "mi", "miles": "mi",
+          "kg": "kg", "kilograms": "kg", "lb": "lb", "lbs": "lb", "pounds": "lb",
+          "years": "years", "year": "years", "people": "people", "%": "percent", "percent": "percent"}
 
 
 @dataclass(frozen=True)
@@ -40,6 +47,47 @@ def extract_numbers(text: str) -> set[tuple[str, float]]:
     return out
 
 
+@dataclass(frozen=True)
+class Quantity:
+    kind: str
+    value: float
+    unit: str | None
+    step: float
+
+
+def extract_quantities(text: str) -> list[Quantity]:
+    out = []
+    for raw, word in _QTY.findall(text):
+        digits = raw.replace(",", "")
+        decimals = len(digits.split(".")[1]) if "." in digits else 0
+        value, step = float(digits), 10 ** -decimals
+        word = (word or "").lower()
+        if word in _MULT:
+            value, step, word = value * _MULT[word], step * _MULT[word], ""
+        unit = _UNITS.get(word)
+        if unit == "percent":
+            out.append(Quantity("percent", value, None, step))
+        elif not unit and "," not in raw and "." not in raw and len(raw) == 4 and 1000 <= value <= 2099:
+            out.append(Quantity("year", value, None, step))
+        else:
+            out.append(Quantity("number", value, unit, step))
+    return out
+
+
+def _comparable(c: Quantity, q: Quantity) -> bool:
+    if c.kind != q.kind:
+        return False
+    if c.unit and q.unit != c.unit:
+        return False
+    if c.kind == "year":
+        return True
+    return abs(q.value - c.value) <= MAGNITUDE_WINDOW * max(abs(c.value), 1e-9)
+
+
+def _same(c: Quantity, q: Quantity) -> bool:
+    return abs(q.value - c.value) <= 0.5 * max(c.step, q.step) + 1e-9
+
+
 def authority_weight(domain: str) -> int:
     domain = domain.lower()
     for weight, suffixes in AUTHORITY.items():
@@ -54,15 +102,14 @@ def _scope_words(text: str) -> set[str]:
     return {w for w in SCOPE_WORDS if f" {w} " in low}
 
 
-def _exact_votes(claim_numbers, judged):
-    kinds = {k for k, _ in claim_numbers}
+def _exact_votes(claim_quantities, judged):
     votes = []
     for ev, _ in judged:
-        q = extract_numbers(ev.quote)
-        if q & claim_numbers:
-            votes.append((ev, PairVerdict.SUPPORTS))
-        elif {k for k, _ in q} & kinds:
-            votes.append((ev, PairVerdict.CONTRADICTS))
+        found = [(c, q) for c in claim_quantities for q in extract_quantities(ev.quote) if _comparable(c, q)]
+        if not found:
+            continue
+        matched = all(any(_same(c, q) for cc, q in found if cc is c) for c in {c for c, _ in found})
+        votes.append((ev, PairVerdict.SUPPORTS if matched else PairVerdict.CONTRADICTS))
     return votes
 
 
@@ -76,9 +123,9 @@ def decide(claim: Claim, outcome: SearchOutcome, judged: list[tuple[Evidence, Pa
     if not judged:
         return Decision(Verdict.DISPUTED, "no-usable-evidence", (), 0.0)
 
-    claim_numbers = extract_numbers(claim.text)
-    if claim_numbers:
-        votes = _exact_votes(claim_numbers, judged)
+    claim_quantities = extract_quantities(claim.text)
+    if claim_quantities:
+        votes = _exact_votes(claim_quantities, judged)
         if not votes:
             return Decision(Verdict.DISPUTED, "exact-facts-unconfirmed", (), 0.0)
         names = ("exact-facts-match", "exact-facts-mismatch")

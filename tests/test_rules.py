@@ -125,3 +125,33 @@ def test_authority_tiers():
     assert authority_weight("www.who.int") == 3
     assert authority_weight("en.wikipedia.org") == 2
     assert authority_weight("blog.com") == 1
+
+
+EV = Claim(id="c", text="Mount Everest is 8,849 metres tall", subject="Mount Everest")
+
+
+def _exact(quote):
+    e = ev("https://a.org/x", quote)
+    return decide(EV, outcome([e]), [(e, pr(U))])
+
+
+def test_more_precise_figure_that_rounds_to_claim_matches():
+    assert _exact("The official height is 8,848.86 metres.").verdict is Verdict.SUPPORTED
+
+
+def test_unit_suffix_attached_matches():
+    assert _exact("Everest, the tallest peak at 8,849m.").verdict is Verdict.SUPPORTED
+
+
+def test_close_figure_in_same_unit_contradicts():
+    assert _exact("Everest is 8,848 metres high.").verdict is Verdict.CONTRADICTED
+
+
+def test_other_unit_and_unrelated_numbers_ignored():
+    d = _exact("It is 29,032 feet; summit reached at 11:30 a.m.")
+    assert (d.verdict, d.rule) == (Verdict.DISPUTED, "exact-facts-unconfirmed")
+
+
+def test_far_off_magnitude_ignored():
+    d = _exact("Base camp sits at 5,300 metres.")
+    assert d.verdict is Verdict.DISPUTED

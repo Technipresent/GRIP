@@ -7,6 +7,8 @@ import httpx
 
 class _Text(HTMLParser):
     SKIP = {"script", "style", "noscript", "nav", "footer", "header", "svg"}
+    BLOCK = {"p", "div", "li", "ul", "ol", "br", "h1", "h2", "h3", "h4", "h5", "h6", "td", "th", "tr",
+             "section", "article", "blockquote", "figcaption", "dd", "dt", "title", "table"}
 
     def __init__(self):
         super().__init__()
@@ -15,10 +17,14 @@ class _Text(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag in self.SKIP:
             self.skip += 1
+        if tag in self.BLOCK:
+            self.parts.append("\n")
 
     def handle_endtag(self, tag):
         if tag in self.SKIP and self.skip:
             self.skip -= 1
+        if tag in self.BLOCK:
+            self.parts.append("\n")
 
     def handle_data(self, data):
         if not self.skip:
@@ -28,14 +34,15 @@ class _Text(HTMLParser):
 def html_to_text(html: str) -> str:
     p = _Text()
     p.feed(html)
-    return re.sub(r"\s+", " ", "".join(p.parts)).strip()
+    lines = (re.sub(r"[^\S\n]+", " ", line).strip() for line in "".join(p.parts).split("\n"))
+    return "\n".join(line for line in lines if line)
 
 
 _SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(])")
 
 
 def split_sentences(text: str) -> list[str]:
-    return [s.strip() for s in _SPLIT.split(text) if s.strip()]
+    return [s.strip() for block in text.split("\n") for s in _SPLIT.split(block) if s.strip()]
 
 
 class DirectReader:
@@ -46,4 +53,5 @@ class DirectReader:
         r = await self.client.get(url, timeout=20, follow_redirects=True,
                                   headers={"User-Agent": "GRIP-Grounding/2.0"})
         r.raise_for_status()
-        return html_to_text(r.text)
+        text = r.text if r.charset_encoding else r.content.decode("utf-8", errors="replace")
+        return html_to_text(text)

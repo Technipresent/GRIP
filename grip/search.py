@@ -52,11 +52,12 @@ def best_quote(claim: Claim, page: str) -> tuple[str, str] | None:
     if not subject or not subject <= page_tokens:
         return None
     wanted = tokens(claim.text)
+    specific = wanted - subject
     sentences = split_sentences(page)
     best, best_score = None, 1
     for i, s in enumerate(sentences):
         st = tokens(s)
-        if not st & subject:
+        if not st & subject or (specific and not st & specific):
             continue
         score = len(st & wanted)
         if score > best_score:

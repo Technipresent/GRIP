@@ -65,3 +65,12 @@ async def test_evidence_order_is_deterministic():
     pages = {"https://z.org/a": PAGE, "https://b.org/a": PAGE}
     out = await gather(CLAIM, plan(CLAIM), {"brave": brave, "exa": FakeProvider("exa")}, FakeReader(pages))
     assert [e.url for e in out.evidence] == ["https://b.org/a", "https://z.org/a"]
+
+
+async def test_sentence_sharing_only_subject_words_is_not_evidence():
+    claim = Claim(id="c", text="Mount Everest is 8,849 metres tall", subject="Mount Everest")
+    page = "Mount Everest is the ultimate dream for many climbers. Nothing else here."
+    brave = FakeProvider("brave", {"everest": ["https://a.org/x"]})
+    out = await gather(claim, plan(claim), {"brave": brave, "exa": FakeProvider("exa")},
+                       FakeReader({"https://a.org/x": page}))
+    assert out.evidence == ()
