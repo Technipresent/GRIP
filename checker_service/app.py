@@ -2,6 +2,7 @@
 Non-generative use only: each model returns a support probability for (evidence, claim).
 Run: uvicorn checker_service.app:build_app --factory --host 0.0.0.0 --port $PORT"""
 import os
+import threading
 from typing import Callable
 
 from fastapi import FastAPI
@@ -11,6 +12,7 @@ ALLOWED = {"hhem": "vectara/hallucination_evaluation_model",
            "minicheck": "lytang/MiniCheck-Flan-T5-Large"}
 
 Scorer = Callable[[list[tuple[str, str]]], list[float]]
+INFER_CHUNK = int(os.environ.get("CHECKER_INFER_CHUNK") or 8)
 
 
 class Pair(BaseModel):
@@ -68,14 +70,22 @@ def create_checker_app(name: str, scorer: Scorer | None = None) -> FastAPI:
         if not self_test(scorer):
             raise RuntimeError(f"{name} failed its start-up self-test; refusing to serve")
     app = FastAPI(title=f"GRIP checker — {name}")
+    # Session-288 (outage fix): inference is CPU-bound and blocking. It runs off the event loop (sync route,
+    # FastAPI thread pool) one request at a time, in small chunks, so /health stays responsive and memory
+    # stays bounded instead of the whole service stalling past the engine's timeout.
+    lock = threading.Lock()
 
     @app.get("/health")
     async def health():
         return {"status": "ok", "checker": name}
 
     @app.post("/score")
-    async def score(req: ScoreRequest):
-        values = scorer([(p.claim, p.evidence) for p in req.pairs])
+    def score(req: ScoreRequest):
+        pairs = [(p.claim, p.evidence) for p in req.pairs]
+        values: list[float] = []
+        with lock:
+            for i in range(0, len(pairs), INFER_CHUNK):
+                values.extend(scorer(pairs[i:i + INFER_CHUNK]))
         return {"scores": [round(min(1.0, max(0.0, float(v))), 6) for v in values]}
 
     return app
