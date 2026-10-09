@@ -38,7 +38,7 @@ def load_minicheck() -> Scorer:
     tok = AutoTokenizer.from_pretrained(ALLOWED["minicheck"])
     model = AutoModelForSeq2SeqLM.from_pretrained(ALLOWED["minicheck"])
     model.eval()
-    label_ids = [tok.convert_tokens_to_ids("▁0"), tok.convert_tokens_to_ids("▁1")]
+    label_ids = [tok("0").input_ids[0], tok("1").input_ids[0]]
 
     def score(pairs):
         texts = [f"premise: {ev} hypothesis: {cl}" for cl, ev in pairs]
@@ -56,6 +56,7 @@ SELF_TEST = [("Paris is the capital of France.", "Paris is the capital and large
 
 def self_test(scorer: Scorer) -> bool:
     scores = scorer([(c, e) for c, e, _ in SELF_TEST])
+    print(f"self-test scores (expect high, low): {[round(float(s), 4) for s in scores]}", flush=True)
     return all((s > 0.5) == expected for s, (_, _, expected) in zip(scores, SELF_TEST))
 
 
