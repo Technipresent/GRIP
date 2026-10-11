@@ -75,6 +75,16 @@ def create_checker_app(name: str, scorer: Scorer | None = None) -> FastAPI:
     # stays bounded instead of the whole service stalling past the engine's timeout.
     lock = threading.Lock()
 
+    def _warm():                                   # Session-288: load the model before the first real request
+        try:
+            with lock:
+                scorer([("warm-up", "warm-up")])
+        except Exception:                          # noqa: BLE001 -- warm-up is best effort
+            pass
+
+    if os.environ.get("CHECKER_WARMUP", "1") == "1":
+        threading.Thread(target=_warm, daemon=True).start()
+
     @app.get("/health")
     async def health():
         return {"status": "ok", "checker": name}

@@ -102,14 +102,71 @@ def _scope_words(text: str) -> set[str]:
     return {w for w in SCOPE_WORDS if f" {w} " in low}
 
 
-def _exact_votes(claim_quantities, judged):
+# --- Session-288 hardening: zero false "true" calls (Founder bar) -------------------------------------------
+_WORD = re.compile(r"[A-Za-z][A-Za-z'\-]+")
+_STOP = {"the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "for", "by", "with", "from", "as", "is",
+         "was", "were", "are", "be", "been", "it", "its", "this", "that", "these", "those", "which", "who", "has",
+         "have", "had", "his", "her", "their", "than", "then", "also", "about", "into", "over", "after", "before"}
+_SECOND_LEVEL = {"co", "com", "gov", "ac", "org", "net", "edu"}
+
+
+def _name_phrases(text: str) -> list[tuple[str, ...]]:
+    """Runs of capitalised content words — 'Mount Everest', 'London' — skipping a common sentence opener."""
+    words = _WORD.findall(text)
+    phrases, run = [], []
+    for i, w in enumerate(words):
+        is_name = w[0].isupper() and len(w) > 1 and w.lower() not in _STOP
+        if is_name:
+            run.append(w.lower())
+        elif run:
+            phrases.append(tuple(run))
+            run = []
+    if run:
+        phrases.append(tuple(run))
+    return phrases
+
+
+def anchored(claim: Claim, quote: str) -> bool:
+    """The quote is about the claim's subject: every name phrase in the claim is present in the quote (its head
+    word, the last word, is enough — 'Everest' satisfies 'Mount Everest'); with no names, at least half the
+    subject's content words appear."""
+    low = quote.lower()
+    phrases = _name_phrases(claim.text)
+    if phrases:
+        return all(p[-1] in low for p in phrases)
+    words = {w.lower() for w in _WORD.findall(claim.subject or claim.text) if w.lower() not in _STOP and len(w) > 2}
+    return bool(words) and sum(1 for w in words if w in low) * 2 >= len(words)
+
+
+def base_domain(domain: str) -> str:
+    labels = domain.lower().strip(".").split(".")
+    if len(labels) >= 3 and labels[-2] in _SECOND_LEVEL:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def corroborated(support) -> bool:
+    """Independent-owner corroboration: two different owners agree, or one top-tier authority."""
+    owners = {base_domain(e.domain) for e in support}
+    return len(owners) >= 2 or any(authority_weight(e.domain) >= 3 for e in support)
+
+
+def _exact_votes(claim, claim_quantities, judged):
     votes = []
-    for ev, _ in judged:
-        found = [(c, q) for c in claim_quantities for q in extract_quantities(ev.quote) if _comparable(c, q)]
+    for ev, res in judged:
+        if not anchored(claim, ev.quote):
+            continue                                    # a number about something else proves nothing
+        quote_q = extract_quantities(ev.quote)
+        found = [(c, q) for c in claim_quantities for q in quote_q if _comparable(c, q)]
         if not found:
             continue
-        matched = all(any(_same(c, q) for cc, q in found if cc is c) for c in {c for c, _ in found})
-        votes.append((ev, PairVerdict.SUPPORTS if matched else PairVerdict.CONTRADICTS))
+        mismatch = any(not any(_same(c, q) for cc, q in found if cc is c) for c in {c for c, _ in found})
+        if mismatch:
+            votes.append((ev, PairVerdict.CONTRADICTS))
+            continue
+        every_fact = all(any(_same(c, q) for q in quote_q) for c in claim_quantities)
+        if every_fact and res.verdict is not PairVerdict.CONTRADICTS:
+            votes.append((ev, PairVerdict.SUPPORTS))
     return votes
 
 
@@ -125,14 +182,20 @@ def decide(claim: Claim, outcome: SearchOutcome, judged: list[tuple[Evidence, Pa
 
     claim_quantities = extract_quantities(claim.text)
     if claim_quantities:
-        votes = _exact_votes(claim_quantities, judged)
+        votes = _exact_votes(claim, claim_quantities, judged)
         if not votes:
             return Decision(Verdict.DISPUTED, "exact-facts-unconfirmed", (), 0.0)
         names = ("exact-facts-match", "exact-facts-mismatch")
     else:
-        votes = [(ev, r.verdict) for ev, r in judged if r.verdict is not PairVerdict.UNCERTAIN]
+        votes = [(ev, r.verdict) for ev, r in judged if r.verdict is not PairVerdict.UNCERTAIN
+                 and (r.verdict is PairVerdict.CONTRADICTS or anchored(claim, ev.quote))]
         if not votes:
-            rule = "checker-outage" if any(r.errors for _, r in judged) else "checkers-uncertain"
+            if any(r.errors for _, r in judged):
+                rule = "checker-outage"
+            elif any(r.verdict is PairVerdict.SUPPORTS for _, r in judged):
+                rule = "support-not-about-subject"
+            else:
+                rule = "checkers-uncertain"
             return Decision(Verdict.DISPUTED, rule, (), 0.0)
         names = ("sources-agree-support", "sources-agree-contradict")
 
@@ -154,6 +217,8 @@ def decide(claim: Claim, outcome: SearchOutcome, judged: list[tuple[Evidence, Pa
         return Decision(Verdict.DISPUTED, "too-close", tuple(support + against), 0.0)
 
     if verdict is Verdict.SUPPORTED:
+        if not corroborated(support):
+            return Decision(Verdict.DISPUTED, "single-owner-support", tuple(support), 0.0)
         scope = _scope_words(claim.text)
         if scope and not any(scope & _scope_words(e.quote) for e in support):
             return Decision(Verdict.DISPUTED, "scope-not-confirmed", tuple(support), 0.0)
