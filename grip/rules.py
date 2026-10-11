@@ -151,9 +151,63 @@ def corroborated(support) -> bool:
     return len(owners) >= 2 or any(authority_weight(e.domain) >= 3 for e in support)
 
 
+# --- Session-288 round 2: failure classes found in the known-answer run -----------------------------------
+_DEBUNK = re.compile(r"\b(myths?|misconceptions?|debunk\w*|hoax(es)?|not true|untrue|false(ly)?|disproven)\b", re.I)
+_ATTRIBUTION = re.compile(
+    r"\b(the (idea|notion|belief|claim) that|notion|legends?|rumou?rs?|supposedly|allegedly|fiction(al)?|"
+    r"claim(s|ed|ing)? that|believe[sd]? that|argue[sd]? that|argued|theor(y|ies) that|says|said)\b", re.I)
+_QUESTIONISH = re.compile(r"_{3,}|\?\s*$|^\s*(is|are|was|were|does|do|did|can|could|should|why|what|how)\b", re.I)
+_OPINION = re.compile(
+    r"\b(elegant|sophisticated|masterpiece|overpriced|overrated|underrated|belongs?|beautiful|delicious|"
+    r"amazing|terrible|awful|stunning|boring|excellent|wonderful|disappointing|tasty|ugly|should|ought)\b", re.I)
+_DEMONSTRATIVE = re.compile(r"^\s*(this|that|these|those)\b", re.I)
+_COPULA = re.compile(r"^\s*(?:the\s+)?(.+?)\s+(is|are|was|were)\s+(?:a|an|the)?\s*(.+?)[.\s]*$", re.I)
+
+
+def not_checkable(claim: Claim) -> str | None:
+    """Opinions and unresolved references can never be Supported by search."""
+    if _DEMONSTRATIVE.search(claim.text) and not _name_phrases(claim.text):
+        return "unresolved-reference"
+    if _OPINION.search(claim.text) and not extract_quantities(claim.text):
+        return "opinion-not-checkable"
+    return None
+
+
+def framed_as_report(quote: str) -> bool:
+    """The quote reports or questions the claim rather than asserting it."""
+    return bool(_ATTRIBUTION.search(quote) or _DEBUNK.search(quote) or _QUESTIONISH.search(quote.strip()))
+
+
+def copular_match(claim: Claim, quote: str) -> bool:
+    """For 'X is a Y' claims the quote must assert it in that order: X, then is/are/was/were, then Y nearby."""
+    m = _COPULA.match(claim.text)
+    if not m:
+        return True
+    subj = [w.lower() for w in _WORD.findall(m.group(1)) if w.lower() not in _STOP]
+    pred = [w.lower() for w in _WORD.findall(m.group(3)) if w.lower() not in _STOP]
+    if not subj or not pred:
+        return True
+    if extract_quantities(m.group(3)):              # numeric predicate: exact-fact rules check the value
+        return re.search(rf"\b{re.escape(subj[-1])}\b(?:\W+\w+){{0,3}}?\W+(is|are|was|were)\b", quote, re.I) is not None
+    pat = (rf"\b{re.escape(subj[-1])}\b(?:\W+\w+){{0,3}}?\W+(is|are|was|were)\b(?:\W+\w+){{0,6}}?\W+"
+           rf"{re.escape(pred[0])}\b")
+    return re.search(pat, quote, re.I) is not None
+
+
+def support_allowed(claim: Claim, quote: str) -> bool:
+    return anchored(claim, quote) and not framed_as_report(quote) and copular_match(claim, quote)
+
+
+def debunks(claim: Claim, quote: str) -> bool:
+    return anchored(claim, quote) and bool(_DEBUNK.search(quote))
+
+
 def _exact_votes(claim, claim_quantities, judged):
     votes = []
     for ev, res in judged:
+        if debunks(claim, ev.quote):
+            votes.append((ev, PairVerdict.CONTRADICTS))
+            continue
         if not anchored(claim, ev.quote):
             continue                                    # a number about something else proves nothing
         quote_q = extract_quantities(ev.quote)
@@ -165,7 +219,7 @@ def _exact_votes(claim, claim_quantities, judged):
             votes.append((ev, PairVerdict.CONTRADICTS))
             continue
         every_fact = all(any(_same(c, q) for q in quote_q) for c in claim_quantities)
-        if every_fact and res.verdict is not PairVerdict.CONTRADICTS:
+        if every_fact and res.verdict is not PairVerdict.CONTRADICTS and support_allowed(claim, ev.quote):
             votes.append((ev, PairVerdict.SUPPORTS))
     return votes
 
@@ -179,6 +233,9 @@ def decide(claim: Claim, outcome: SearchOutcome, judged: list[tuple[Evidence, Pa
         return Decision(Verdict.NO_EVIDENCE, "zero-results-anywhere", (), 0.0)
     if not judged:
         return Decision(Verdict.DISPUTED, "no-usable-evidence", (), 0.0)
+    unchecked = not_checkable(claim)
+    if unchecked:
+        return Decision(Verdict.DISPUTED, unchecked, (), 0.0)
 
     claim_quantities = extract_quantities(claim.text)
     if claim_quantities:
@@ -187,8 +244,14 @@ def decide(claim: Claim, outcome: SearchOutcome, judged: list[tuple[Evidence, Pa
             return Decision(Verdict.DISPUTED, "exact-facts-unconfirmed", (), 0.0)
         names = ("exact-facts-match", "exact-facts-mismatch")
     else:
-        votes = [(ev, r.verdict) for ev, r in judged if r.verdict is not PairVerdict.UNCERTAIN
-                 and (r.verdict is PairVerdict.CONTRADICTS or anchored(claim, ev.quote))]
+        votes = []
+        for ev, r in judged:
+            if debunks(claim, ev.quote):
+                votes.append((ev, PairVerdict.CONTRADICTS))
+            elif r.verdict is PairVerdict.CONTRADICTS:
+                votes.append((ev, r.verdict))
+            elif r.verdict is PairVerdict.SUPPORTS and support_allowed(claim, ev.quote):
+                votes.append((ev, r.verdict))
         if not votes:
             if any(r.errors for _, r in judged):
                 rule = "checker-outage"
